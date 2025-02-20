@@ -1,17 +1,10 @@
 # Protocol Name 
 
 
-### Prize Pool TO BE FILLED OUT BY CYFRIN
+### Prize Pool
 
-- Total Pool - 
-- H/M -  
-- Low - 
-- Community Judging - 
-
-- Starts: 
-- Ends: 
-
-- nSLOC: 
+- Starts: February 20, 2025 
+- Ends: February 27, 2025
 
 [//]: # (contest-details-open)
 
