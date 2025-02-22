@@ -179,6 +179,7 @@ def claim(user: address, total_amount: uint256, proof: DynArray[bytes32, 20]) ->
 
     # Calculate how much the user can claim now
     if vested > current_amount:
+        # @audit
         claimable = vested - current_amount
 
     assert claimable > 0, "Nothing to claim"

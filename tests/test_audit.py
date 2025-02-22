@@ -1,42 +1,36 @@
 import boa
-from datetime import datetime
 import pytest
+
+from eth_utils import from_wei, to_wei
 from script import load_merkle_proofs
 
 # vesting info: 31% TGE, 69% linear vesting over 3 months
 
+ONE_DAY = 60 * 60 * 24
+THIRTY_DAYS = ONE_DAY * 30
+SIXTY_DAYS = ONE_DAY * 60
+NINETY_DAYS = ONE_DAY * 90
+
 # helper functions
 
 
-def to_wei(amount: int) -> int:
-    return amount * 10**18
+def to_wei_ether(amount: int) -> int:
+    return to_wei(amount, "ether")
 
 
-def from_wei(amount: int) -> int:
-    return amount // 10**18
-
-
-def warp(timestamp: int):
-    boa.env.evm.patch.timestamp = timestamp
-
-
-def curr_time() -> int:
-    return int(datetime.now().timestamp())
+def from_wei_ether(amount: int) -> int:
+    return from_wei(amount, "ether")
 
 
 def block_timestamp() -> int:
     return boa.env.evm.patch.timestamp
 
 
-def thirty_days() -> int:
-    return 60 * 60 * 24 * 30
+def block_number() -> int:
+    return boa.env.evm.patch.block_number
 
 
-def ninety_days() -> int:
-    return 60 * 60 * 24 * 90
-
-
-class TestVestingSystem:
+class TestAudit:
     @pytest.fixture(autouse=True)
     def setup(self, vesting_system):
         self.token, self.airdrop = vesting_system
@@ -61,43 +55,76 @@ class TestVestingSystem:
         assert self.airdrop.merkle_root() == merkle_root
 
     def test_claim(self):
-        # user should get only 31% of the tokens
+        # ------------------------------------------------------------------
+        #                          31% OF TOKENS
+        # ------------------------------------------------------------------
+        expected_amount = self.airdrop.claimable_amount(self.user1, self.amount)
         self.airdrop.claim(self.user1, self.amount, self.proof)
         user_balance = self.token.balanceOf(self.user1)
-        expected_amount = self.amount * 31 // 100
-        assert from_wei(user_balance) == from_wei(expected_amount)
+        assert from_wei_ether(user_balance) == from_wei_ether(expected_amount)
 
-        # claim again, should fail because the amount is 0
+        # ------------------------------------------------------------------
+        #                        REVERT CLAIM AGAIN
+        # ------------------------------------------------------------------
         with boa.reverts(vm_error="Nothing to claim"):
             self.airdrop.claim(self.user1, self.amount, self.proof)
 
-        # after 30 days
-        warp(curr_time() + thirty_days())
+        # ------------------------------------------------------------------
+        #                             30 DAYS
+        # ------------------------------------------------------------------
+        boa.env.time_travel(THIRTY_DAYS)
+        expected_claim_amount = self.airdrop.claimable_amount(self.user1, self.amount)
+        user_prev_balance = self.token.balanceOf(self.user1)
+        user_claimed_amount = self.airdrop.claimed_amount(self.user1)
         self.airdrop.claim(self.user1, self.amount, self.proof)
 
         user_balance = self.token.balanceOf(self.user1)
+        instant_release = (self.amount * 31) // 100
         linear_vesting = (self.amount * 69) // 100
-        expected_amount = (self.amount * 31 // 100) + (
-            linear_vesting * thirty_days()
-        ) // ninety_days()
-        assert user_balance == expected_amount
+        expected_amount = (
+            instant_release + (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
+        )
+        assert expected_claim_amount == expected_amount - user_claimed_amount
+        assert user_balance == expected_claim_amount + user_prev_balance
 
-        # after 60 days total
-        warp(block_timestamp() + thirty_days())
+        # ------------------------------------------------------------------
+        #                             60 DAYS
+        # ------------------------------------------------------------------
+        boa.env.time_travel(THIRTY_DAYS)
+        expected_claim_amount = self.airdrop.claimable_amount(self.user1, self.amount)
+        user_prev_balance = self.token.balanceOf(self.user1)
+        user_claimed_amount = self.airdrop.claimed_amount(self.user1)
         self.airdrop.claim(self.user1, self.amount, self.proof)
 
-        expected_amount = (self.amount * 31 // 100) + (linear_vesting * 60) // 90
-        assert self.token.balanceOf(self.user1) == expected_amount
+        user_balance = self.token.balanceOf(self.user1)
+        instant_release = (self.amount * 31) // 100
+        linear_vesting = (self.amount * 69) // 100
+        expected_amount = instant_release + (linear_vesting * SIXTY_DAYS) // NINETY_DAYS
+        assert expected_claim_amount == expected_amount - user_claimed_amount
+        assert user_balance == expected_claim_amount + user_prev_balance
 
-        # after 90 days total
-        warp(block_timestamp() + thirty_days())
+        # ------------------------------------------------------------------
+        #                             90 DAYS
+        # ------------------------------------------------------------------
+        boa.env.time_travel(THIRTY_DAYS)
+        expected_claim_amount = self.airdrop.claimable_amount(self.user1, self.amount)
+        user_prev_balance = self.token.balanceOf(self.user1)
+        user_claimed_amount = self.airdrop.claimed_amount(self.user1)
         self.airdrop.claim(self.user1, self.amount, self.proof)
 
-        expected_amount = self.amount
-        assert self.token.balanceOf(self.user1) == expected_amount
+        user_balance = self.token.balanceOf(self.user1)
+        instant_release = (self.amount * 31) // 100
+        linear_vesting = (self.amount * 69) // 100
+        expected_amount = (
+            instant_release + (linear_vesting * NINETY_DAYS) // NINETY_DAYS
+        )
+        assert expected_claim_amount == expected_amount - user_claimed_amount
+        assert user_balance == self.amount
 
-        # cannot claim anymore
-        warp(block_timestamp() + thirty_days())
+        # ------------------------------------------------------------------
+        #                       CANNOT CLAIM ANYMORE
+        # ------------------------------------------------------------------
+        boa.env.time_travel(THIRTY_DAYS)
         with boa.reverts(vm_error="Nothing to claim"):
             self.airdrop.claim(self.user1, self.amount, self.proof)
 
@@ -107,7 +134,7 @@ class TestVestingSystem:
         should get full amount and cannot claim anymore
         """
 
-        warp(curr_time() + ninety_days())
+        boa.env.time_travel(NINETY_DAYS)
         self.airdrop.claim(self.user1, self.amount, self.proof)
         assert self.token.balanceOf(self.user1) == self.amount
 
@@ -120,7 +147,7 @@ class TestVestingSystem:
         """
 
         def claim_at(days: int):
-            warp(block_timestamp() + 60 * 60 * 24 * days)
+            boa.env.time_travel(ONE_DAY * days)
             self.airdrop.claim(self.user1, self.amount, self.proof)
 
         # claim at 1 day
@@ -144,7 +171,8 @@ class TestVestingSystem:
         users cannot claim anything before the start
         """
 
-        warp(0)
+        boa.env.evm.patch.timestamp = block_timestamp() - 1
+        boa.env.evm.patch.block_number = block_number() - 1
         with boa.reverts(vm_error="Claiming is not available yet"):
             self.airdrop.claim(self.user1, self.amount, self.proof)
 
@@ -156,36 +184,34 @@ class TestVestingSystem:
 
         # 31% unlocked at TGE
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert from_wei(claimable) == from_wei(self.amount * 31 // 100)
+        assert from_wei_ether(claimable) == from_wei_ether(self.amount * 31 // 100)
 
         linear_vesting = (self.amount * 69) // 100
-        time_now = block_timestamp()
 
         # after 30 days
-        warp(time_now + thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
         assert (
             claimable
-            == (self.amount * 31 // 100)
-            + (linear_vesting * thirty_days()) // ninety_days()
+            == (self.amount * 31 // 100) + (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
         )
 
         # after 60 days
-        warp(time_now + 2 * thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
         assert (
             claimable
             == (self.amount * 31 // 100)
-            + (linear_vesting * 2 * thirty_days()) // ninety_days()
+            + (linear_vesting * 2 * THIRTY_DAYS) // NINETY_DAYS
         )
 
         # after 90 days
-        warp(time_now + 3 * thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
         assert claimable == self.amount
 
         # cannot claim anymore, but the view function doesn't keep track of the state, so it will be full self.amount
-        warp(time_now + 4 * thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
         assert claimable == self.amount
 
@@ -197,12 +223,12 @@ class TestVestingSystem:
 
         # check if TGE is correct
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert from_wei(claimable) == from_wei(self.amount * 31 // 100)
+        assert from_wei_ether(claimable) == from_wei_ether(self.amount * 31 // 100)
 
         # claim with user1
         self.airdrop.claim(self.user1, self.amount, self.proof)
         # should only get 31% of the tokens
-        assert from_wei(self.token.balanceOf(self.user1)) == from_wei(
+        assert from_wei_ether(self.token.balanceOf(self.user1)) == from_wei_ether(
             self.amount * 31 // 100
         )
 
@@ -210,40 +236,43 @@ class TestVestingSystem:
         with boa.reverts(vm_error="Nothing to claim"):
             self.airdrop.claim(self.user1, self.amount, self.proof)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert from_wei(claimable) == 0
+        assert from_wei_ether(claimable) == 0
 
         # after 30 days
-        warp(block_timestamp() + thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert claimable == (linear_vesting * thirty_days()) // ninety_days()
+        assert claimable == (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
         self.airdrop.claim(self.user1, self.amount, self.proof)
-        assert from_wei(self.token.balanceOf(self.user1)) == from_wei(
-            (self.amount * 31 // 100)
-            + (linear_vesting * thirty_days()) // ninety_days()
+        assert from_wei_ether(self.token.balanceOf(self.user1)) == from_wei_ether(
+            (self.amount * 31 // 100) + (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
         )
 
         # after 60 days total
-        warp(block_timestamp() + thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert claimable == (linear_vesting * thirty_days()) // ninety_days()
+        assert claimable == (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
         self.airdrop.claim(self.user1, self.amount, self.proof)
-        assert from_wei(self.token.balanceOf(self.user1)) == from_wei(
+        assert from_wei_ether(self.token.balanceOf(self.user1)) == from_wei_ether(
             (self.amount * 31 // 100) + (linear_vesting * 60) // 90
         )
 
         # after 90 days total
-        warp(block_timestamp() + thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert claimable == (linear_vesting * thirty_days()) // ninety_days()
+        assert claimable == (linear_vesting * THIRTY_DAYS) // NINETY_DAYS
         self.airdrop.claim(self.user1, self.amount, self.proof)
-        assert from_wei(self.token.balanceOf(self.user1)) == from_wei(self.amount)
+        assert from_wei_ether(self.token.balanceOf(self.user1)) == from_wei_ether(
+            (self.amount * 31 // 100) + (linear_vesting * 90) // 90
+        )
 
         # cannot claim anymore
-        warp(block_timestamp() + thirty_days())
+        boa.env.time_travel(THIRTY_DAYS)
         with boa.reverts(vm_error="Nothing to claim"):
             self.airdrop.claim(self.user1, self.amount, self.proof)
         claimable = self.airdrop.claimable_amount(self.user1, self.amount)
-        assert from_wei(claimable) == 0
+        assert from_wei_ether(claimable) == 0
+        claimable = self.airdrop.claimable_amount(self.user1, self.amount)
+        assert from_wei_ether(claimable) == 0
 
     def test_rescue_tokens(self):
         """
@@ -252,10 +281,10 @@ class TestVestingSystem:
         amount = 1000
         airdrop_balance = self.token.balanceOf(self.airdrop.address)
 
-        self.airdrop.rescue_tokens(self.token.address, to_wei(amount))
-        assert self.token.balanceOf(self.airdrop.address) == airdrop_balance - to_wei(
-            amount
-        )
+        self.airdrop.rescue_tokens(self.token.address, to_wei_ether(amount))
+        assert self.token.balanceOf(
+            self.airdrop.address
+        ) == airdrop_balance - to_wei_ether(amount)
         # assert self.token.balanceOf(boa.tx.origin) == to_wei(amount)
 
     def test_set_timestamp(self):
