@@ -3,7 +3,6 @@ import boa
 from src import VestedAirdrop, Token
 from moccasin.boa_tools import VyperContract
 
-# from datetime import datetime
 from script import load_merkle_proofs
 
 
