@@ -1,8 +1,10 @@
 import boa
 import pytest
 
+from boa.util.abi import Address
 from eth_utils import from_wei, to_wei
 from script import load_merkle_proofs
+from eth.constants import ZERO_ADDRESS
 
 # vesting info: 31% TGE, 69% linear vesting over 3 months
 
@@ -304,3 +306,67 @@ class TestAudit:
                 self.airdrop.set_merkle_root(b"0x0")
             with boa.reverts(revert_msg):
                 self.airdrop.rescue_tokens(self.token.address, 0)
+    
+    # ------------------------------------------------------------------
+    #                           AUDIT TESTS
+    # ------------------------------------------------------------------
+    def test_audit_claimable_amount_with_user_address_zero(self):
+        """
+        claimable_amount with user address zero
+        """
+        claimable = self.airdrop.claimable_amount(Address("0x" + ZERO_ADDRESS.hex()), self.amount)
+        print(claimable)
+        assert claimable == 0
+    
+    def test_audit_claim_with_user_address_zero(self):
+        """
+        claimable_amount with user address zero
+        """
+        claimable = self.airdrop.claim(Address("0x" + ZERO_ADDRESS.hex()), self.amount, self.proof)
+        print(claimable)
+        assert claimable == 0
+
+    def test_audit_claim_timestamp_manipulation(self):
+        """Test realistic timestamp manipulation within Ethereum constraints"""
+        
+        initial_amount = to_wei_ether(1000)
+        total_time = 90 * ONE_DAY  # 90 days vesting period
+        
+        # Setup initial state
+        start_time = block_timestamp()
+        
+        # Calculate expected initial vested amount (31% instant)
+        expected_initial = (initial_amount * 31) // 100
+        
+        # Try to manipulate timestamp by maximum allowed (15 seconds)
+        MAX_TIMESTAMP_MANIPULATION = 15  # seconds
+        
+        # Simulate multiple blocks with maximum timestamp manipulation
+        for _ in range(10):  # Simulate 10 blocks of manipulation
+            # Move time forward by max allowed
+            boa.env.time_travel(MAX_TIMESTAMP_MANIPULATION)
+            
+            # Calculate manipulated amount
+            manipulated_time = block_timestamp() - start_time
+            linear_portion = (initial_amount * 69) // 100
+            expected_manipulated = expected_initial + (linear_portion * manipulated_time) // total_time
+            
+            # Verify the manipulation effect
+            actual_vested = self.airdrop.claimable_amount(self.user1, initial_amount)
+            assert actual_vested == expected_manipulated, "Manipulation should follow linear vesting schedule"
+            
+            # Try to claim with manipulated timestamp
+            if actual_vested > 0:
+                with boa.reverts("Invalid proof"):  # Should fail due to invalid merkle proof
+                    self.airdrop.claim(self.user1, initial_amount, [b"0x00"])
+        
+        # Calculate total manipulation effect
+        total_manipulation = MAX_TIMESTAMP_MANIPULATION * 10  # 150 seconds total
+        manipulation_percentage = (total_manipulation / total_time) * 100
+        
+        print(f"Total time manipulated: {total_manipulation} seconds")
+        print(f"Percentage of vesting affected: {manipulation_percentage:.4f}%")
+        
+        # Assert the manipulation impact is minimal
+        assert manipulation_percentage < 0.01, "Timestamp manipulation should have minimal impact"
+

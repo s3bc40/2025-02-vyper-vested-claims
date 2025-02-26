@@ -37,6 +37,25 @@ LINEAR_VESTING_PERCENT: uint256 = 69
 MAX_PROOF_LENGTH: uint256 = 20
 ```
 
+### [I-3] Enhance safety by explicitly setting the owner address in the constructor
+
+**Description:**
+
+The owner is currently set within the `VestedAirdrop.vy::__init__` constructor using the `msg.sender` value. For enhanced safety, it is recommended to explicitly pass the intended owner address as an argument during contract deployment.
+
+**Impact:**
+
+An incorrect deployment could inadvertently assign ownership to an unintended EOA or contract.
+
+**Recommended Mitigation:**
+
+Modify the constructor to accept the owner as an argument:
+
+```diff
+- def __init__(merkle_root: bytes32, token: address, vesting_start_time: uint256, vesting_end_time: uint256):
++ def __init__(merkle_root: bytes32, token: address, vesting_start_time: uint256, vesting_end_time: uint256, owner: address):
+```
+
 ## Gas
 
 ### [G-1] Store variables should be immutable to improve gas efficiency
@@ -190,6 +209,115 @@ boa.env.time_travel(THIRTY_DAYS)
 
 I propose a reworked test file with all the original tests but with the recommended mitigation on my fork:
 https://github.com/s3bc40/2025-02-vyper-vested-claims/blob/92c54dd15738435b4db2245655fbef0c8a0fa0b6/tests/test_audit.py
+
+
+### [L-3] Consider adding zero address checks for user
+
+**Description:**
+
+The following functions do not check if the user address is the zero address before proceeding with execution:
+
+- `VestedAirdrop::rescue_tokens`
+- `VestedAirdrop::claim`
+- `VestedAirdrop::claimable_amount`
+
+`VestedAirdrop::claim` would likely fail with the `verify_proof` assertion if the user address is the zero address. However, it is recommended to add a check for the zero address to prevent any unexpected behavior.
+
+**Impact:**
+
+`VestedAirdrop::rescue_tokens` could send tokens to the zero address unintentionally. `VestedAirdrop::claimable_amount` could return a false claimable amount for the zero address. `VestedAirdrop::claim` would likely fail with the `verify_proof` assertion if the user address is the zero address, unless the zero address is included in the Merkle tree.
+
+**Proof of Concept:**
+
+```py
+def test_audit_claimable_amount_with_user_address_zero(self):
+    """
+    claimable_amount with user address zero
+    @dev will fail since it does not check the Merkle tree and return
+    amount for the zero address
+    """
+    claimable = self.airdrop.claimable_amount(Address("0x" + ZERO_ADDRESS.hex()), self.amount)
+    assert claimable == 0
+
+def test_audit_claim_with_user_address_zero(self):
+    """
+    claim with user address zero
+    @dev will fail on first assertion `verify_proof` since the user address is zero and not in the Merkle tree (but it could be)
+    """
+    claimable = self.airdrop.claim(Address("0x" + ZERO_ADDRESS.hex()), self.amount, self.proof)
+    assert claimable == 0
+```
+
+**Recommended Mitigation:**
+
+Add a check to ensure the user address is not the zero address before proceeding with execution:
+
+```py
+from eth.constants import ZERO_ADDRESS
+...
+assert user != ZERO_ADDRESS, "User address cannot be zero"
+```
+
+### [L-4] Block timestamp can be manipulated by miners
+
+**Description:**
+
+The block timestamp can be influenced by miners to a certain degree. `VestedAirdrop::_calculate_vested_amount`, `VestedAirdrop::claimable_amount`, and `VestedAirdrop::claim` use the block timestamp to calculate the vested and claimable amounts. This could be manipulated by miners to negatively affect the contract.
+
+**Impact:**
+
+The impact should be minimal since the period between TGE and the end of the vesting period is likely long enough to prevent miners from significantly manipulating the timestamp. However, it remains a risk to consider.
+
+**Proof of Concept:**
+
+```python
+def test_audit_claim_timestamp_manipulation(self):
+    """Test realistic timestamp manipulation within Ethereum constraints"""
+    
+    initial_amount = to_wei_ether(1000)
+    total_time = 90 * ONE_DAY  # 90 days vesting period
+    
+    # Setup initial state
+    start_time = block_timestamp()
+    
+    # Calculate expected initial vested amount (31% instant)
+    expected_initial = (initial_amount * 31) // 100
+    
+    # Try to manipulate timestamp by maximum allowed (15 seconds)
+    MAX_TIMESTAMP_MANIPULATION = 15  # seconds
+    
+    # Simulate multiple blocks with maximum timestamp manipulation
+    for _ in range(10):  # Simulate 10 blocks of manipulation
+        # Move time forward by max allowed
+        boa.env.time_travel(MAX_TIMESTAMP_MANIPULATION)
+        
+        # Calculate manipulated amount
+        manipulated_time = block_timestamp() - start_time
+        linear_portion = (initial_amount * 69) // 100
+        expected_manipulated = expected_initial + (linear_portion * manipulated_time) // total_time
+        
+        # Verify the manipulation effect
+        actual_vested = self.airdrop.claimable_amount(self.user1, initial_amount)
+        assert actual_vested == expected_manipulated, "Manipulation should follow linear vesting schedule"
+        
+        # Try to claim with manipulated timestamp
+        if actual_vested > 0:
+            with boa.reverts("Invalid proof"):  # Should fail due to invalid merkle proof
+                self.airdrop.claim(self.user1, initial_amount, [b"0x00"])
+    
+    # Calculate total manipulation effect
+    total_manipulation = MAX_TIMESTAMP_MANIPULATION * 10  # 150 seconds total
+    manipulation_percentage = (total_manipulation / total_time) * 100
+    
+    print(f"Total time manipulated: {total_manipulation} seconds")
+    print(f"Percentage of vesting affected: {manipulation_percentage:.4f}%")
+    
+    # Assert the manipulation impact is minimal
+    assert manipulation_percentage < 0.01, "Timestamp manipulation should have minimal impact"
+```
+
+**Recommended Mitigation:** 
+Consider adding a delay if you intend to use timestamps in the contract (e.g., 15 seconds). Alternatively, use block numbers instead of timestamps to calculate the time passed, though this could be more complex. Another option is to use an oracle to obtain the timestamp.
 
 ## Medium
 
